@@ -1,146 +1,115 @@
-/**
- * RK RAJA BOT GROUP NAME LOCKER 
- * * Prerequisites:
- * 1. Install Node.js on your computer/server.
- * 2. Run: npm init -y
- * 3. Run: npm install fca-unofficial fs
- * 4. You need an 'appstate.json' file in the same folder. This contains 
- * your Facebook session cookies. (It is highly recommended to use a 
- * dummy/fake Facebook account for this, NOT your main account).
- */
+import requests
+import json
+import time
 
-const login = require("fca-unofficial");
-const fs = require("fs");
+"""
+Facebook Graph API Integration Script
+--------------------------------------
+This script demonstrates how to interact with the Facebook Graph API using 
+a User Access Token. 
 
-// This object stores our locked settings in memory.
-// In a real bot, you'd save this to a database or JSON file so it isn't lost on restart.
-let lockedSettings = {};
+Prerequisites:
+1. A Facebook Developer Account.
+2. A registered App in the Meta for Developers portal.
+3. A 'User Access Token' from the Graph API Explorer.
+   Link: https://developers.facebook.com/tools/explorer/
+"""
 
-// Load your Facebook session cookies
-let appState;
-try {
-    appState = JSON.parse(fs.readFileSync('appstate.json', 'utf8'));
-} catch (err) {
-    console.error("Error: Could not find appstate.json. Please generate your session cookies.");
-    process.exit(1);
-}
+class FacebookBot:
+    def __init__(self, access_token):
+        self.base_url = "https://graph.facebook.com/v18.0"
+        self.access_token = access_token
 
-login({ appState: appState }, (err, api) => {
-    if (err) return console.error("Login failed:", err);
+    def _get_request(self, endpoint, params=None):
+        """Internal helper for GET requests with exponential backoff."""
+        if params is None:
+            params = {}
+        params['access_token'] = self.access_token
+        
+        url = f"{self.base_url}/{endpoint}"
+        
+        retries = 0
+        max_retries = 5
+        backoff = 1 # seconds
 
-    console.log("Bot logged in successfully! Listening for messages and events...");
-
-    // Listen to all incoming messages and events
-    api.listenMqtt((err, event) => {
-        if (err) return console.error(err);
-
-        const threadID = event.threadID;
-
-        // Initialize settings for this thread if they don't exist
-        if (!lockedSettings[threadID]) {
-            lockedSettings[threadID] = {
-                lockedName: null,
-                lockedNicknames: {}, // Format: { "userID": "Nickname" }
-                nameLocked: false,
-                nicknamesLocked: false
-            };
-        }
-
-        const settings = lockedSettings[threadID];
-
-        // ==========================================
-        // 1. HANDLE TEXT COMMANDS (To activate locks)
-        // ==========================================
-        if (event.type === "message" && event.body) {
-            const message = event.body.toLowerCase();
-
-            // Command: /lockname [Name]
-            if (message.startsWith("/lockname ")) {
-                const newName = event.body.substring(10).trim();
-                settings.lockedName = newName;
-                settings.nameLocked = true;
+        while retries < max_retries:
+            try:
+                response = requests.get(url, params=params)
+                data = response.json()
                 
-                api.setTitle(newName, threadID, (err) => {
-                    if (!err) api.sendMessage(`🔒 Group name has been locked to: "${newName}"`, threadID);
-                });
-            }
-
-            // Command: /unlockname
-            if (message === "/unlockname") {
-                settings.nameLocked = false;
-                api.sendMessage("🔓 Group name unlocked.", threadID);
-            }
-
-            // Command: /locknick [uid] [Nickname]
-            // Example: /locknick 1000123456789 The Boss
-            if (message.startsWith("/locknick ")) {
-                const parts = event.body.split(" ");
-                if (parts.length >= 3) {
-                    const targetUID = parts[1];
-                    const targetNick = parts.slice(2).join(" ");
-                    
-                    settings.lockedNicknames[targetUID] = targetNick;
-                    settings.nicknamesLocked = true;
-                    
-                    api.changeNickname(targetNick, threadID, targetUID, (err) => {
-                        if (!err) api.sendMessage(`🔒 Nickname locked for user!`, threadID);
-                    });
-                }
-            }
-        }
-
-        // ==========================================
-        // 2. HANDLE EVENTS (The Anti-Change System)
-        // ==========================================
-        if (event.type === "event") {
+                if response.status_code == 200:
+                    return data
+                else:
+                    print(f"API Error: {data.get('error', {}).get('message', 'Unknown Error')}")
+                    return None
+            except Exception as e:
+                print(f"Connection error: {e}")
             
-            // --- A. PREVENT GROUP NAME CHANGES ---
-            if (event.logMessageType === "log:thread-name") {
-                const newName = event.logMessageData.name;
-                
-                // If the name is locked and the new name isn't the locked name
-                if (settings.nameLocked && settings.lockedName && newName !== settings.lockedName) {
-                    console.log(`Reverting name in ${threadID} back to ${settings.lockedName}`);
-                    
-                    // Change it right back!
-                    api.setTitle(settings.lockedName, threadID, (err) => {
-                        if (!err) {
-                            api.sendMessage("⚠️ Group name is locked. You cannot change it.", threadID);
-                        }
-                    });
-                }
-            }
+            retries += 1
+            time.sleep(backoff)
+            backoff *= 2 # Exponential backoff
+            
+        return None
 
-            // --- B. PREVENT NICKNAME CHANGES ---
-            if (event.logMessageType === "log:user-nickname") {
-                const changedUID = event.logMessageData.participant_id;
-                const newNick = event.logMessageData.nickname;
+    def _post_request(self, endpoint, data=None):
+        """Internal helper for POST requests."""
+        if data is None:
+            data = {}
+        data['access_token'] = self.access_token
+        
+        url = f"{self.base_url}/{endpoint}"
+        
+        try:
+            response = requests.post(url, data=data)
+            return response.json()
+        except Exception as e:
+            print(f"Request failed: {e}")
+            return None
 
-                // If this specific user has a locked nickname
-                if (settings.nicknamesLocked && settings.lockedNicknames[changedUID]) {
-                    const enforcedNick = settings.lockedNicknames[changedUID];
-                    
-                    if (newNick !== enforcedNick) {
-                        console.log(`Reverting nickname for ${changedUID}`);
-                        
-                        // Change it right back!
-                        api.changeNickname(enforcedNick, threadID, changedUID, (err) => {
-                            if (!err) {
-                                api.sendMessage("⚠️ That nickname is locked.", threadID);
-                            }
-                        });
-                    }
-                }
-            }
+    def get_me(self):
+        """Fetch basic profile info of the token owner."""
+        print("Fetching profile info...")
+        return self._get_request("me", {"fields": "id,name,email"})
 
-            // --- C. PREVENT PHOTO CHANGES ---
-            // Group photo locking is handled via "log:thread-icon"
-            if (event.logMessageType === "log:thread-icon") {
-                // To revert an image, you have to upload the image file again using api.changeGroupImage()
-                // You would need to store the fs.createReadStream('locked_image.png') in your settings.
-                // For simplicity, we just send a warning message here.
-                api.sendMessage("⚠️ Please do not change the group photo!", threadID);
-            }
-        }
-    });
-});
+    def get_my_posts(self):
+        """Fetch the last 5 posts from the user's feed."""
+        print("Fetching recent posts...")
+        return self._get_request("me/feed", {"limit": 5})
+
+    def post_status(self, message):
+        """
+        Post a status update. 
+        Requires 'publish_video' or 'pages_manage_posts' permissions depending on target.
+        """
+        print(f"Attempting to post: {message}")
+        return self._post_request("me/feed", {"message": message})
+
+def main():
+    # --- CONFIGURATION ---
+    # Replace with your actual token from https://developers.facebook.com/tools/explorer/
+    USER_TOKEN = "" 
+
+    if not USER_TOKEN:
+        print("Error: Please provide a valid User Access Token in the script.")
+        return
+
+    bot = FacebookBot(USER_TOKEN)
+
+    # 1. Get Profile Information
+    profile = bot.get_me()
+    if profile:
+        print(f"Logged in as: {profile.get('name')} (ID: {profile.get('id')})")
+
+    # 2. Get Feed
+    feed = bot.get_my_posts()
+    if feed and 'data' in feed:
+        print("\nYour last few posts:")
+        for post in feed['data']:
+            print(f"- {post.get('created_time')}: {post.get('message', '[No Text]')}")
+
+    # 3. Post a message (Requires specific permissions)
+    # result = bot.post_status("Hello from Python script!")
+    # print(result)
+
+if __name__ == "__main__":
+    main()
